@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#1F3D2B"><link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-192.png"><title>Acervo SSMA</title>
+<style>
+:root{--g:#1F3D2B;--y:#F2B705;--bg:#F5F6F1;--ink:#1B1F1C;--mut:#6B7469;--ln:#D9DDD3}
+*{box-sizing:border-box}body{margin:0;font:16px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--ink)}
+header{background:var(--g);color:#fff;padding:calc(12px + env(safe-area-inset-top)) 16px 12px;position:sticky;top:0;z-index:5}
+header h1{margin:0 0 10px;font-size:20px;display:flex;justify-content:space-between;align-items:center}
+header button{background:var(--y);color:var(--ink);border:0;border-radius:8px;padding:8px 12px;font-weight:600;font-size:14px}
+input[type=search],input[type=password]{width:100%;padding:12px;border-radius:8px;border:1px solid var(--ln);font-size:16px}
+.chips{display:flex;gap:8px;overflow-x:auto;padding:10px 16px;scrollbar-width:none}
+.chips button{flex:none;border:1px solid var(--ln);background:#fff;border-radius:20px;padding:7px 14px;font-size:14px;color:var(--ink)}
+.chips button.on{background:var(--g);color:#fff;border-color:var(--g)}
+ul{list-style:none;margin:0;padding:0 16px calc(24px + env(safe-area-inset-bottom))}
+li button{width:100%;text-align:left;background:#fff;border:1px solid var(--ln);border-left:5px solid var(--y);border-radius:8px;padding:12px 14px;margin-bottom:8px;font-size:16px;color:var(--ink)}
+li small{display:block;color:var(--mut);font-size:13px;margin-top:2px}
+.box{max-width:420px;margin:12vh auto;padding:0 20px}.box h2{margin:0 0 6px}.box p{color:var(--mut)}
+.box button{width:100%;margin-top:12px;background:var(--g);color:#fff;border:0;border-radius:8px;padding:14px;font-size:16px;font-weight:600}
+#st{padding:10px 16px;font-size:14px;color:var(--mut)}#st.err{color:#B3261E}
+.hide{display:none}
+#viewer{position:fixed;inset:0;background:#3a3f3b;z-index:20;display:flex;flex-direction:column}
+#vh{background:var(--g);color:#fff;display:flex;align-items:center;gap:8px;padding:calc(8px + env(safe-area-inset-top)) 10px 8px}
+#vh b{flex:1;font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#vh button{background:var(--y);color:var(--ink);border:0;border-radius:8px;min-width:40px;height:38px;font-weight:700;font-size:18px;padding:0 10px}
+#vp{flex:1;overflow:auto;-webkit-overflow-scrolling:touch;padding:8px 0 calc(8px + env(safe-area-inset-bottom))}
+#pw{margin:0 auto}.pg{background:#fff;margin:0 auto 8px;width:100%}.pg canvas{display:block;width:100%;height:100%}
+#vmsg{color:#fff;text-align:center;padding:30px}
+</style></head><body>
+<div id="setup" class="box hide"><h2>Acervo SSMA</h2>
+<p>Primeiro acesso: conecte à internet, digite o código de acesso e baixe os documentos. Depois disso o app funciona sem sinal.</p>
+<input type="password" id="code" placeholder="Código de acesso" autocomplete="off"><button id="go">Baixar documentos</button></div>
+<div id="app" class="hide">
+<header><h1>Acervo SSMA <button id="up">Atualizar</button></h1><input type="search" id="q" placeholder="Buscar documento"></header>
+<div class="chips" id="chips"></div><div id="st"></div><ul id="list"></ul></div>
+<div id="viewer" class="hide"><div id="vh"><button id="vx" aria-label="Fechar">&larr;</button><b id="vt"></b><button id="vm" aria-label="Reduzir">&minus;</button><button id="vpl" aria-label="Ampliar">+</button></div>
+<div id="vp"><div id="pw"></div></div></div>
+<script src="lib/pdf.min.js"></script>
+<script>
+const $=s=>document.querySelector(s);
+const dbp=new Promise((res,rej)=>{const r=indexedDB.open('acervo',1);r.onupgradeneeded=()=>r.result.createObjectStore('docs',{keyPath:'id'});r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error)});
+const tx=async(m,f)=>{const d=await dbp;return new Promise((res,rej)=>{const t=d.transaction('docs',m);const o=f(t.objectStore('docs'));t.oncomplete=()=>res(o&&o.result);t.onerror=()=>rej(t.error)})};
+const getAll=()=>tx('readonly',s=>s.getAll()),put=d=>tx('readwrite',s=>s.put(d)),del=id=>tx('readwrite',s=>s.delete(id));
+const kc={};
+async function key(code,salt){const id=code+salt.join();if(kc[id])return kc[id];
+ const m=await crypto.subtle.importKey('raw',new TextEncoder().encode(code),'PBKDF2',false,['deriveKey']);
+ return kc[id]=await crypto.subtle.deriveKey({name:'PBKDF2',salt,iterations:200000,hash:'SHA-256'},m,{name:'AES-GCM',length:256},false,['decrypt'])}
+async function dec(buf,code){const u=new Uint8Array(buf);return crypto.subtle.decrypt({name:'AES-GCM',iv:u.slice(16,28)},await key(code,u.slice(0,16)),u.slice(28))}
+function st(t,e){const s=$('#st');s.textContent=t;s.className=e?'err':''}
+async function sync(code){
+ st('Verificando documentos…');
+ let r;try{r=await fetch('docs/index.enc?'+Date.now())}catch{throw new Error('Sem internet. Conecte-se para atualizar.')}
+ if(!r.ok)throw new Error('Não foi possível baixar a lista de documentos.');
+ let idx;try{idx=JSON.parse(new TextDecoder().decode(await dec(await r.arrayBuffer(),code)))}catch{throw new Error('Código incorreto.')}
+ const have=await getAll(),ids=new Set(idx.map(d=>d.id)),hm=new Map(have.map(h=>[h.id,h]));
+ for(const h of have)if(!ids.has(h.id))await del(h.id);
+ const miss=idx.filter(d=>!hm.has(d.id));let n=0;
+ for(const d of idx){
+  if(hm.has(d.id)){await put({...hm.get(d.id),nome:d.nome,cat:d.cat});continue}
+  st(`Baixando ${++n} de ${miss.length}…`);
+  const f=await fetch('docs/'+d.id+'.enc');if(!f.ok)throw new Error('Falha ao baixar '+d.nome);
+  await put({...d,pdf:await dec(await f.arrayBuffer(),code)});
+ }
+}
+let docs=[],cat='Todos';
+async function load(){docs=(await getAll()).sort((a,b)=>a.nome.localeCompare(b.nome,'pt'));show()}
+function show(){
+ $('#setup').classList.toggle('hide',docs.length>0);$('#app').classList.toggle('hide',!docs.length);
+ if(!docs.length)return;
+ const cats=['Todos',...new Set(docs.map(d=>d.cat))];if(!cats.includes(cat))cat='Todos';
+ $('#chips').innerHTML='';cats.forEach(c=>{const b=document.createElement('button');b.textContent=c;b.className=c===cat?'on':'';b.onclick=()=>{cat=c;show()};$('#chips').append(b)});
+ const q=$('#q').value.toLowerCase(),ul=$('#list');ul.innerHTML='';
+ const f=docs.filter(d=>(cat==='Todos'||d.cat===cat)&&d.nome.toLowerCase().includes(q));
+ if(!f.length)ul.innerHTML='<li style="color:var(--mut);padding:8px 0">Nenhum documento encontrado.</li>';
+ f.forEach(d=>{const li=document.createElement('li'),b=document.createElement('button');
+  b.innerHTML='<span></span><small></small>';b.firstChild.textContent=d.nome;b.lastChild.textContent=d.cat+' · '+(d.pdf.byteLength/1048576).toFixed(1)+' MB';
+  b.onclick=()=>openDoc(d);
+  li.append(b);ul.append(li)});
+}
+$('#q').oninput=show;
+pdfjsLib.GlobalWorkerOptions.workerSrc='lib/pdf.worker.min.js';
+let pdf,zoom=1,sizes=[],obs,tk=0;
+async function openDoc(d){
+ const my=++tk;zoom=1;$('#vt').textContent=d.nome;$('#viewer').classList.remove('hide');
+ history.pushState({v:1},'');$('#pw').innerHTML='<div id="vmsg">Abrindo…</div>';
+ try{
+  pdf=await pdfjsLib.getDocument({data:new Uint8Array(d.pdf.slice(0))}).promise;
+  sizes=[];for(let i=1;i<=pdf.numPages;i++){const v=(await pdf.getPage(i)).getViewport({scale:1});sizes.push([v.width,v.height])}
+  if(my===tk)layout();
+ }catch(e){$('#pw').innerHTML='<div id="vmsg">Não foi possível abrir este PDF.</div>'}
+}
+function layout(){
+ if(obs)obs.disconnect();const pw=$('#pw');pw.innerHTML='';pw.style.width=(zoom*100)+'%';
+ obs=new IntersectionObserver(es=>es.forEach(en=>{const el=en.target;
+  if(en.isIntersecting)draw(el);else{const c=el.firstChild;if(c){c.width=0;el.dataset.r=''}}}),{root:$('#vp'),rootMargin:'600px 0px'});
+ sizes.forEach((z,i)=>{const el=document.createElement('div');el.className='pg';el.dataset.i=i+1;el.style.aspectRatio=z[0]+'/'+z[1];
+  el.append(document.createElement('canvas'));pw.append(el);obs.observe(el)});
+}
+async function draw(el){
+ if(el.dataset.r)return;el.dataset.r='1';const i=+el.dataset.i,c=el.firstChild;
+ const page=await pdf.getPage(i),w=Math.floor(el.clientWidth*Math.min(devicePixelRatio||1,2));
+ const vp=page.getViewport({scale:w/sizes[i-1][0]});c.width=vp.width;c.height=vp.height;
+ try{await page.render({canvasContext:c.getContext('2d'),viewport:vp}).promise}catch{}
+}
+const zs=[1,1.5,2,3];
+$('#vpl').onclick=()=>{const k=zs.indexOf(zoom);if(k<zs.length-1){zoom=zs[k+1];layout()}};
+$('#vm').onclick=()=>{const k=zs.indexOf(zoom);if(k>0){zoom=zs[k-1];layout()}};
+function closeV(){tk++;$('#viewer').classList.add('hide');$('#pw').innerHTML='';if(obs)obs.disconnect();if(pdf){pdf.destroy();pdf=null}}
+$('#vx').onclick=()=>history.back();
+addEventListener('popstate',()=>{if(!$('#viewer').classList.contains('hide'))closeV()});
+$('#go').onclick=async()=>{const b=$('#go');b.disabled=true;b.textContent='Baixando…';
+ try{await sync($('#code').value);await load()}catch(e){alert(e.message)}b.disabled=false;b.textContent='Baixar documentos'};
+$('#up').onclick=async()=>{const c=prompt('Código de acesso para atualizar:');if(!c)return;
+ try{await sync(c);await load();st('Documentos atualizados.')}catch(e){st(e.message,1)}};
+if('serviceWorker'in navigator)navigator.serviceWorker.register('sw.js');
+if(navigator.storage&&navigator.storage.persist)navigator.storage.persist();
+load();
+</script></body></html>
